@@ -379,7 +379,7 @@ function RentalBilling() {
         </td>
         <td>${fmt(b.internetCost)}</td>
       </tr>
-      ${b.previousBalance > 0 ? `<tr><td>Previous balance</td><td>${fmt(b.previousBalance)}</td></tr>` : ""}
+      ${b.previousBalance > 0 ? '<tr><td>Previous balance</td><td>' + fmt(b.previousBalance) + '</td></tr>' : ""}
       <tr class="total-row">
         <td>Total due</td>
         <td>${fmt(b.total)}</td>
