@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rent Ledger</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #F6F2EA; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root">Loading...</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js" crossorigin></script>
+
+<script>
+  // Storage shim: mirrors the window.storage API this app was built against,
+  // backed by this browser's localStorage. Single-device only, no sync.
+  window.storage = {
+    async get(key) {
+      try {
+        const v = localStorage.getItem(key);
+        return v === null ? null : { key, value: v, shared: false };
+      } catch (e) {
+        console.error("storage.get failed", e);
+        return null;
+      }
+    },
+    async set(key, value) {
+      try {
+        localStorage.setItem(key, value);
+        return { key, value, shared: false };
+      } catch (e) {
+        console.error("storage.set failed", e);
+        return null;
+      }
+    },
+    async delete(key) {
+      localStorage.removeItem(key);
+      return { key, deleted: true, shared: false };
+    },
+    async list(prefix) {
+      const keys = Object.keys(localStorage).filter((k) => !prefix || k.startsWith(prefix));
+      return { keys, prefix, shared: false };
+    },
+  };
+</script>
+
+<script type="text/babel" data-presets="react">
+  const { useState, useEffect, useRef } = React;
+
+const STORAGE_KEY = "rental-billing-data";
+
+const fmt = (n) =>
+  (Math.round((Number(n) || 0) * 100) / 100).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+const uid = () =>
+  (crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(36).slice(2));
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+function makeRow(renter) {
+  const lastBill = renter.bills[0];
+  return {
+    rent: lastBill ? String(lastBill.rent) : "",
+    devices: lastBill ? String(lastBill.devices) : "",
+    previousBalance: String(renter.outstandingBalance || 0),
+    notes: "",
+    included: true,
+    error: "",
+  };
+}
+
+function RentalBilling() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState(null);
+  const [confirmRenterDelete, setConfirmRenterDelete] = useState(false);
+  const [confirmBillDeleteId, setConfirmBillDeleteId] = useState(null);
+  const [newRenterName, setNewRenterName] = useState("");
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [cycleDate, setCycleDate] = useState(todayStr());
+  const [masterBillTotal, setMasterBillTotal] = useState("");
+  const [masterKwhUsed, setMasterKwhUsed] = useState("");
+  const [submeterCurrent, setSubmeterCurrent] = useState("");
+  const [submeterPreviousInput, setSubmeterPreviousInput] = useState("");
+  const [internetRate, setInternetRate] = useState("");
+  const [rows, setRows] = useState({});
+  const [cycleError, setCycleError] = useState("");
+  const initialized = useRef(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (res && res.value) {
+          const parsed = JSON.parse(res.value);
+          setData({ renters: parsed.renters || {}, settings: parsed.settings || {} });
+          if (parsed.settings && parsed.settings.internetRatePerDevice != null) {
+            setInternetRate(String(parsed.settings.internetRatePerDevice));
+          }
+          if (parsed.settings && parsed.settings.lastSubmeterReading != null) {
+            setSubmeterPreviousInput(String(parsed.settings.lastSubmeterReading));
+          }
+        } else {
+          setData({ renters: {}, settings: {} });
+        }
+      } catch (e) {
+        setData({ renters: {}, settings: {} });
+      }
+      initialized.current = true;
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!initialized.current || !data) return;
+    (async () => {
+      try {
+        await window.storage.set(STORAGE_KEY, JSON.stringify(data), false);
+      } catch (e) {
+        console.error("Save failed", e);
+      }
+    })();
+  }, [data]);
+
+  useEffect(() => {
+    if (!data) return;
+    setRows((prev) => {
+      const next = { ...prev };
+      Object.values(data.renters).forEach((r) => {
+        if (!next[r.id]) next[r.id] = makeRow(r);
+      });
+      Object.keys(next).forEach((id) => {
+        if (!data.renters[id]) delete next[id];
+      });
+      return next;
+    });
+  }, [data && Object.keys(data.renters).join(",")]);
+
+  if (loading || !data) {
+    return (
+      <div style={{ padding: 40, fontFamily: FONT_BODY, color: "#6E7B84" }}>
+        Loading your billing data...
+      </div>
+    );
+  }
+
+  const renterList = Object.values(data.renters).sort((a, b) => a.name.localeCompare(b.name));
+  const selected = selectedId ? data.renters[selectedId] : null;
+  const submeterPreviousNum = parseFloat(submeterPreviousInput) || 0;
+
+  function addRenter() {
+    const name = newRenterName.trim();
+    if (!name) return;
+    const id = uid();
+    setData((prev) => ({
+      ...prev,
+      renters: {
+        ...prev.renters,
+        [id]: { id, name, outstandingBalance: 0, bills: [] },
+      },
+    }));
+    setNewRenterName("");
+    setSelectedId(id);
+  }
+
+  function requestDeleteRenter() {
+    setConfirmRenterDelete(true);
+  }
+
+  function confirmDeleteRenter(id) {
+    setData((prev) => {
+      const next = { ...prev.renters };
+      delete next[id];
+      return { ...prev, renters: next };
+    });
+    setSelectedId(null);
+    setConfirmRenterDelete(false);
+  }
+
+  function cancelDeleteRenter() {
+    setConfirmRenterDelete(false);
+  }
+
+  function updateRow(renterId, field, value) {
+    setRows((prev) => ({ ...prev, [renterId]: { ...prev[renterId], [field]: value, error: "" } }));
+  }
+
+  function recordPayment() {
+    const amt = parseFloat(paymentAmount);
+    if (!selected || isNaN(amt) || amt <= 0) return;
+    setData((prev) => {
+      const r = prev.renters[selected.id];
+      return {
+        ...prev,
+        renters: {
+          ...prev.renters,
+          [r.id]: { ...r, outstandingBalance: Math.max(0, (r.outstandingBalance || 0) - amt) },
+        },
+      };
+    });
+    setPaymentAmount("");
+  }
+
+  function requestDeleteBill(billId) {
+    setConfirmBillDeleteId(billId);
+  }
+
+  function confirmDeleteBill(billId) {
+    setData((prev) => {
+      const r = prev.renters[selected.id];
+      const bills = r.bills.filter((b) => b.id !== billId);
+      return {
+        ...prev,
+        renters: { ...prev.renters, [r.id]: { ...r, bills } },
+      };
+    });
+    setConfirmBillDeleteId(null);
+  }
+
+  function cancelDeleteBill() {
+    setConfirmBillDeleteId(null);
+  }
+
+  // ---- Cycle computation ----
+  const internetRateNum = parseFloat(internetRate) || 0;
+  const masterBillNum = parseFloat(masterBillTotal) || 0;
+  const masterKwhNum = parseFloat(masterKwhUsed) || 0;
+  const rate = masterKwhNum > 0 ? masterBillNum / masterKwhNum : 0;
+
+  const submeterCurrentNum = parseFloat(submeterCurrent);
+  const hasSubmeterReading = submeterCurrent !== "" && !isNaN(submeterCurrentNum);
+  const submeterKwhUsed = hasSubmeterReading ? Math.max(0, submeterCurrentNum - submeterPreviousNum) : 0;
+  const submeterBillAmount = submeterKwhUsed * rate;
+
+  const includedRenters = renterList.filter((r) => (rows[r.id] || makeRow(r)).included);
+  const perRenterElectric = includedRenters.length > 0 ? submeterBillAmount / includedRenters.length : 0;
+
+  function generateCycleBills() {
+    setCycleError("");
+    if (includedRenters.length === 0) return setCycleError("Include at least one renter in this cycle.");
+    if (!masterBillTotal || masterBillNum <= 0) return setCycleError("Enter the master bill total.");
+    if (!masterKwhUsed || masterKwhNum <= 0) return setCycleError("Enter the total kWh used on the master bill.");
+    if (!hasSubmeterReading) return setCycleError("Enter the current submeter reading.");
+    if (submeterCurrentNum < submeterPreviousNum) return setCycleError(`Submeter reading can't be less than the previous reading (${submeterPreviousNum}).`);
+
+    for (const r of includedRenters) {
+      const row = rows[r.id];
+      const rentNum = parseFloat(row.rent);
+      if (row.rent === "" || isNaN(rentNum)) return setCycleError(`Enter rent for ${r.name}.`);
+    }
+
+    setData((prev) => {
+      const nextRenters = { ...prev.renters };
+      includedRenters.forEach((r) => {
+        const row = rows[r.id];
+        const rentNum = parseFloat(row.rent) || 0;
+        const devicesNum = parseFloat(row.devices) || 0;
+        const prevBalanceNum = parseFloat(row.previousBalance) || 0;
+        const internetCost = devicesNum * internetRateNum;
+        const total = rentNum + perRenterElectric + internetCost + prevBalanceNum;
+
+        const bill = {
+          id: uid(),
+          date: cycleDate || todayStr(),
+          rent: rentNum,
+          kwhRate: rate,
+          masterBillTotal: masterBillNum,
+          masterKwhUsed: masterKwhNum,
+          submeterPrevious: submeterPreviousNum,
+          submeterCurrent: submeterCurrentNum,
+          submeterKwhUsed,
+          submeterBillAmount,
+          sharedAmongCount: includedRenters.length,
+          electricCost: perRenterElectric,
+          devices: devicesNum,
+          internetRatePerDevice: internetRateNum,
+          internetCost,
+          previousBalance: prevBalanceNum,
+          total,
+          notes: row.notes || "",
+        };
+
+        const existing = nextRenters[r.id];
+        nextRenters[r.id] = {
+          ...existing,
+          outstandingBalance: total,
+          bills: [bill, ...existing.bills],
+        };
+      });
+
+      return {
+        ...prev,
+        renters: nextRenters,
+        settings: {
+          ...prev.settings,
+          internetRatePerDevice: internetRateNum,
+          lastSubmeterReading: submeterCurrentNum,
+        },
+      };
+    });
+
+    setRows((prev) => {
+      const next = { ...prev };
+      includedRenters.forEach((r) => {
+        const row = prev[r.id];
+        const rentNum = parseFloat(row.rent) || 0;
+        const devicesNum = parseFloat(row.devices) || 0;
+        const internetCost = devicesNum * internetRateNum;
+        const total = rentNum + perRenterElectric + internetCost + (parseFloat(row.previousBalance) || 0);
+        next[r.id] = {
+          rent: row.rent,
+          devices: row.devices,
+          previousBalance: String(total),
+          notes: "",
+          included: true,
+          error: "",
+        };
+      });
+      return next;
+    });
+    setMasterBillTotal("");
+    setMasterKwhUsed("");
+    setSubmeterPreviousInput(String(submeterCurrentNum));
+    setSubmeterCurrent("");
+  }
+
+  function printBill(renterName, b) {
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Billing Statement - ${renterName}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #23303A; padding: 32px; max-width: 640px; margin: 0 auto; }
+  h1 { font-family: Georgia, serif; font-size: 22px; margin: 0; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 2px solid #23303A; padding-bottom: 10px; margin-bottom: 16px; }
+  .renter { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 8px 4px; border-bottom: 1px solid #DDD6C9; vertical-align: top; }
+  td:last-child { text-align: right; white-space: nowrap; font-family: "SF Mono", Menlo, Consolas, monospace; }
+  .sub { font-size: 11px; color: #6E7B84; margin-top: 2px; }
+  .total-row td { font-weight: 700; font-size: 16px; border-top: 2px solid #23303A; border-bottom: none; }
+  .notes { margin-top: 24px; padding-top: 12px; border-top: 1px dashed #DDD6C9; font-size: 13px; }
+  .notes-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6E7B84; margin-bottom: 4px; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>Billing Statement</h1>
+    <div>${b.date}</div>
+  </div>
+  <div class="renter">${renterName}</div>
+  <table>
+    <tbody>
+      <tr>
+        <td>Rent</td>
+        <td>${fmt(b.rent)}</td>
+      </tr>
+      <tr>
+        <td>
+          Electric
+          <div class="sub">Submeter ${b.submeterPrevious} to ${b.submeterCurrent} = ${b.submeterKwhUsed} kWh at ${fmt(b.kwhRate)}/kWh = ${fmt(b.submeterBillAmount)}, split ${b.sharedAmongCount} ways</div>
+        </td>
+        <td>${fmt(b.electricCost)}</td>
+      </tr>
+      <tr>
+        <td>
+          Internet
+          <div class="sub">${b.devices} device${b.devices === 1 ? "" : "s"} at ${fmt(b.internetRatePerDevice)} each</div>
+        </td>
+        <td>${fmt(b.internetCost)}</td>
+      </tr>
+      ${b.previousBalance > 0 ? `<tr><td>Previous balance</td><td>${fmt(b.previousBalance)}</td></tr>` : ""}
+      <tr class="total-row">
+        <td>Total due</td>
+        <td>${fmt(b.total)}</td>
+      </tr>
+    </tbody>
+  </table>
+  ${b.notes ? `<div class="notes"><div class="notes-label">Note</div><div>${b.notes}</div></div>` : ""}
+  <script>
+    window.onload = function () {
+      window.focus();
+      window.print();
+    };
+  </script>
+</body>
+</html>`;
+
+    const win = window.open("", "_blank");
+    if (!win) {
+      alert("Your browser blocked the print window. Please allow pop-ups for this site and try again.");
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    // Fallback in case the popup's own onload script doesn't fire in time.
+    setTimeout(() => {
+      try {
+        win.focus();
+        win.print();
+      } catch (e) {
+        // ignore; the popup's own onload handler is the primary trigger
+      }
+    }, 400);
+  }
+
+  return (
+    <div className="rb-root">
+      <style>{CSS}</style>
+      <aside className="rb-sidebar">
+        <h1 className="rb-brand">Rent Ledger</h1>
+        <div className="rb-add">
+          <input
+            className="rb-input"
+            placeholder="New renter name"
+            value={newRenterName}
+            onChange={(e) => setNewRenterName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addRenter()}
+          />
+          <button className="rb-btn rb-btn-add" onClick={addRenter}>Add</button>
+        </div>
+        <div className="rb-renter-list">
+          {renterList.length === 0 && (
+            <div className="rb-empty-note">No renters yet. Add one above.</div>
+          )}
+          {renterList.map((r) => (
+            <button
+              key={r.id}
+              className={"rb-renter-item" + (r.id === selectedId ? " rb-renter-item-active" : "")}
+              onClick={() => {
+                setSelectedId(r.id);
+                setConfirmRenterDelete(false);
+                setConfirmBillDeleteId(null);
+              }}
+            >
+              <span className="rb-renter-name">{r.name}</span>
+              <span className={"rb-renter-balance" + ((r.outstandingBalance || 0) > 0 ? " rb-balance-due" : "")}>
+                {(r.outstandingBalance || 0) > 0 ? `Due ${fmt(r.outstandingBalance)}` : "Paid up"}
+              </span>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      <main className="rb-main">
+        <section className="rb-form-card">
+          <h3 className="rb-card-title">New billing cycle</h3>
+          <p className="rb-hint">
+            The rate per kWh comes from the master bill: total bill divided by the total kWh it covers.
+            The submeter reading for this cycle (current minus previous) times that rate gives the shared
+            electric amount, which gets split equally across everyone included below.
+          </p>
+          <div className="rb-cycle-top">
+            <label className="rb-field">
+              <span>Cycle date</span>
+              <input className="rb-input" type="date" value={cycleDate} onChange={(e) => setCycleDate(e.target.value)} />
+            </label>
+            <label className="rb-field">
+              <span>Master bill total</span>
+              <input className="rb-input" inputMode="decimal" placeholder="0.00" value={masterBillTotal} onChange={(e) => setMasterBillTotal(e.target.value)} />
+            </label>
+            <label className="rb-field">
+              <span>Master bill kWh used</span>
+              <input className="rb-input" inputMode="decimal" placeholder="0" value={masterKwhUsed} onChange={(e) => setMasterKwhUsed(e.target.value)} />
+            </label>
+            <label className="rb-field">
+              <span>Submeter previous reading (editable)</span>
+              <input className="rb-input" inputMode="decimal" placeholder="0" value={submeterPreviousInput} onChange={(e) => setSubmeterPreviousInput(e.target.value)} />
+            </label>
+            <label className="rb-field">
+              <span>Submeter current reading</span>
+              <input className="rb-input" inputMode="decimal" placeholder="0" value={submeterCurrent} onChange={(e) => setSubmeterCurrent(e.target.value)} />
+            </label>
+            <label className="rb-field">
+              <span>Internet rate per device</span>
+              <input className="rb-input" inputMode="decimal" placeholder="0.00" value={internetRate} onChange={(e) => setInternetRate(e.target.value)} />
+            </label>
+          </div>
+
+          <div className="rb-computed">
+            <div className="rb-computed-row"><span>Rate per kWh</span><span className="rb-mono">{fmt(rate)}</span></div>
+            <div className="rb-computed-row"><span>Submeter kWh used</span><span className="rb-mono">{submeterKwhUsed}</span></div>
+            <div className="rb-computed-row"><span>Submeter bill amount</span><span className="rb-mono">{fmt(submeterBillAmount)}</span></div>
+            <div className="rb-computed-row rb-total-row">
+              <span>Electric share per renter ({includedRenters.length} included)</span>
+              <span className="rb-mono">{fmt(perRenterElectric)}</span>
+            </div>
+          </div>
+
+          {renterList.length === 0 ? (
+            <div className="rb-empty-note">Add a renter on the left to start a cycle.</div>
+          ) : (
+            <div className="rb-table-wrap">
+              <table className="rb-table">
+                <thead>
+                  <tr>
+                    <th>Include</th>
+                    <th>Renter</th>
+                    <th>Rent</th>
+                    <th>Devices</th>
+                    <th>Previous balance</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {renterList.map((r) => {
+                    const row = rows[r.id] || makeRow(r);
+                    return (
+                      <tr key={r.id} className={row.included ? "" : "rb-row-excluded"}>
+                        <td>
+                          <input type="checkbox" checked={row.included} onChange={(e) => updateRow(r.id, "included", e.target.checked)} />
+                        </td>
+                        <td>{r.name}</td>
+                        <td>
+                          <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="0.00"
+                            value={row.rent} onChange={(e) => updateRow(r.id, "rent", e.target.value)} />
+                        </td>
+                        <td>
+                          <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="0"
+                            value={row.devices} onChange={(e) => updateRow(r.id, "devices", e.target.value)} />
+                        </td>
+                        <td>
+                          <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="0.00"
+                            value={row.previousBalance} onChange={(e) => updateRow(r.id, "previousBalance", e.target.value)} />
+                        </td>
+                        <td>
+                          <input className="rb-input rb-input-cell rb-input-notes" placeholder="Optional"
+                            value={row.notes || ""} onChange={(e) => updateRow(r.id, "notes", e.target.value)} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {cycleError && <div className="rb-form-error">{cycleError}</div>}
+          <button className="rb-btn rb-btn-primary" onClick={generateCycleBills}>Generate bills for this cycle</button>
+        </section>
+
+        {!selected && (
+          <div className="rb-blank">
+            <p>Select a renter on the left to view their outstanding balance and bill history.</p>
+          </div>
+        )}
+
+        {selected && (
+          <>
+            <header className="rb-header">
+              <div>
+                <h2 className="rb-header-name">{selected.name}</h2>
+              </div>
+              <div className="rb-header-right">
+                <div className={"rb-outstanding" + ((selected.outstandingBalance || 0) > 0 ? " rb-balance-due" : "")}>
+                  {fmt(selected.outstandingBalance || 0)}
+                  <span className="rb-outstanding-label">outstanding</span>
+                </div>
+                {confirmRenterDelete ? (
+                  <div className="rb-confirm-row">
+                    <span className="rb-confirm-text">Remove {selected.name} and all history?</span>
+                    <button className="rb-btn rb-btn-danger" onClick={() => confirmDeleteRenter(selected.id)}>Confirm</button>
+                    <button className="rb-btn" onClick={cancelDeleteRenter}>Cancel</button>
+                  </div>
+                ) : (
+                  <button className="rb-btn rb-btn-danger" onClick={requestDeleteRenter}>Remove renter</button>
+                )}
+              </div>
+            </header>
+
+            <div className="rb-payment-row">
+              <input
+                className="rb-input rb-input-sm"
+                placeholder="Payment amount"
+                value={paymentAmount}
+                onChange={(e) => setPaymentAmount(e.target.value)}
+              />
+              <button className="rb-btn" onClick={recordPayment}>Record payment</button>
+            </div>
+
+            <section className="rb-history">
+              <h3 className="rb-card-title">Bill history</h3>
+              {selected.bills.length === 0 && <div className="rb-empty-note">No bills recorded yet.</div>}
+              {selected.bills.map((b) => (
+                <article key={b.id} className="rb-receipt">
+                  <div className="rb-receipt-top">
+                    <span className="rb-receipt-date">{b.date}</span>
+                    <div className="rb-receipt-actions">
+                      <button className="rb-receipt-print" onClick={() => printBill(selected.name, b)}>Print</button>
+                      {confirmBillDeleteId === b.id ? (
+                        <>
+                          <span className="rb-confirm-text-sm">Delete this bill?</span>
+                          <button className="rb-receipt-delete rb-receipt-delete-confirm" onClick={() => confirmDeleteBill(b.id)}>Confirm</button>
+                          <button className="rb-receipt-delete" onClick={cancelDeleteBill}>Cancel</button>
+                        </>
+                      ) : (
+                        <button className="rb-receipt-delete" onClick={() => requestDeleteBill(b.id)} aria-label="Delete bill">Delete</button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="rb-receipt-line">
+                    <span className="rb-tag rb-tag-rent">Rent</span>
+                    <span className="rb-mono">{fmt(b.rent)}</span>
+                  </div>
+                  <div className="rb-receipt-line">
+                    <span className="rb-tag rb-tag-electric">Electric</span>
+                    <span className="rb-mono">{fmt(b.electricCost)}</span>
+                  </div>
+                  <div className="rb-receipt-sub">
+                    Submeter {b.submeterPrevious} to {b.submeterCurrent} = {b.submeterKwhUsed} kWh at {fmt(b.kwhRate)}/kWh
+                    = {fmt(b.submeterBillAmount)}, split {b.sharedAmongCount} ways
+                  </div>
+                  <div className="rb-receipt-line">
+                    <span className="rb-tag rb-tag-internet">Internet</span>
+                    <span className="rb-mono">{fmt(b.internetCost)}</span>
+                  </div>
+                  <div className="rb-receipt-sub">
+                    {b.devices} device{b.devices === 1 ? "" : "s"} at {fmt(b.internetRatePerDevice)} each
+                  </div>
+                  {b.previousBalance > 0 && (
+                    <div className="rb-receipt-line">
+                      <span className="rb-tag rb-tag-balance">Previous balance</span>
+                      <span className="rb-mono">{fmt(b.previousBalance)}</span>
+                    </div>
+                  )}
+                  <div className="rb-receipt-divider" />
+                  <div className="rb-receipt-line rb-receipt-total">
+                    <span>Total</span>
+                    <span className="rb-mono">{fmt(b.total)}</span>
+                  </div>
+                  {b.notes && (
+                    <div className="rb-receipt-note">
+                      <span className="rb-receipt-note-label">Note</span>
+                      <span>{b.notes}</span>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </section>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
+const FONT_DISPLAY = '"Iowan Old Style", "Palatino Linotype", Georgia, serif';
+const FONT_BODY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+const FONT_MONO = '"SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace';
+
+const CSS = `
+.rb-root {
+  --paper: #F6F2EA;
+  --panel: #FFFFFF;
+  --ink: #23303A;
+  --muted: #6E7B84;
+  --line: #DDD6C9;
+  --rent: #3B5169;
+  --electric: #B5722A;
+  --internet: #1F7A6C;
+  --balance: #A6432D;
+  display: flex;
+  min-height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: ${FONT_BODY};
+}
+
+.rb-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 24px 18px;
+  box-sizing: border-box;
+}
+
+.rb-brand {
+  font-family: ${FONT_DISPLAY};
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 20px 0;
+  color: var(--ink);
+}
+
+.rb-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.rb-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: ${FONT_BODY};
+}
+
+.rb-input:focus {
+  outline: 2px solid var(--rent);
+  outline-offset: 1px;
+}
+
+.rb-input-readonly {
+  color: var(--muted);
+  background: #EFEAE0;
+}
+
+.rb-input-cell {
+  min-width: 90px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.rb-input-notes {
+  min-width: 140px;
+}
+
+.rb-input-sm {
+  max-width: 180px;
+}
+
+.rb-btn {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rb-btn:hover {
+  opacity: 0.85;
+}
+
+.rb-btn-add {
+  padding: 8px 12px;
+}
+
+.rb-btn-primary {
+  background: var(--rent);
+  border-color: var(--rent);
+  margin-top: 14px;
+}
+
+.rb-btn-danger {
+  background: transparent;
+  color: var(--balance);
+  border-color: var(--balance);
+}
+
+.rb-confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rb-confirm-text {
+  font-size: 12px;
+  color: var(--balance);
+  max-width: 140px;
+  text-align: right;
+}
+
+.rb-confirm-text-sm {
+  font-size: 12px;
+  color: var(--balance);
+}
+
+.rb-receipt-delete-confirm {
+  color: var(--balance);
+  font-weight: 700;
+}
+
+.rb-renter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rb-renter-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 10px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.rb-renter-item:hover {
+  background: var(--paper);
+}
+
+.rb-renter-item-active {
+  background: var(--paper);
+  border-color: var(--line);
+}
+
+.rb-renter-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rb-renter-balance {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ${FONT_MONO};
+}
+
+.rb-balance-due {
+  color: var(--balance);
+}
+
+.rb-empty-note {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 6px 2px;
+}
+
+.rb-main {
+  flex: 1;
+  padding: 32px 40px;
+  overflow-y: auto;
+  max-width: 1100px;
+}
+
+.rb-hint {
+  font-size: 13px;
+  color: var(--muted);
+  margin: -6px 0 16px 0;
+  line-height: 1.5;
+}
+
+.rb-blank {
+  color: var(--muted);
+  font-size: 15px;
+  margin-top: 20px;
+  text-align: center;
+}
+
+.rb-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+  margin-bottom: 20px;
+}
+
+.rb-header-name {
+  font-family: ${FONT_DISPLAY};
+  font-size: 28px;
+  margin: 0;
+}
+
+.rb-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.rb-outstanding {
+  font-family: ${FONT_MONO};
+  font-size: 24px;
+  text-align: right;
+}
+
+.rb-outstanding-label {
+  display: block;
+  font-family: ${FONT_BODY};
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rb-payment-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.rb-form-card, .rb-history {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px 22px;
+  margin-bottom: 24px;
+}
+
+.rb-card-title {
+  font-family: ${FONT_DISPLAY};
+  font-size: 18px;
+  margin: 0 0 6px 0;
+}
+
+.rb-cycle-top {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.rb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rb-table-wrap {
+  overflow-x: auto;
+  margin-top: 18px;
+}
+
+.rb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.rb-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rb-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.rb-row-excluded {
+  opacity: 0.45;
+}
+
+.rb-computed {
+  margin-top: 4px;
+  border-top: 1px dashed var(--line);
+  padding-top: 12px;
+}
+
+.rb-computed-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 4px 0;
+}
+
+.rb-total-row {
+  font-weight: 700;
+  font-size: 16px;
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.rb-mono {
+  font-family: ${FONT_MONO};
+}
+
+.rb-form-error {
+  color: var(--balance);
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.rb-receipt {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--paper);
+}
+
+.rb-receipt-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.rb-receipt-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.rb-receipt-print {
+  border: none;
+  background: none;
+  color: var(--rent);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.rb-receipt-print:hover {
+  opacity: 0.75;
+}
+
+.rb-receipt-date {
+  font-family: ${FONT_MONO};
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rb-receipt-delete {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.rb-receipt-delete:hover {
+  color: var(--balance);
+}
+
+.rb-receipt-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 3px 0;
+}
+
+.rb-receipt-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0 0 4px 0;
+}
+
+.rb-tag {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: #fff;
+}
+
+.rb-tag-rent { background: var(--rent); }
+.rb-tag-electric { background: var(--electric); }
+.rb-tag-internet { background: var(--internet); }
+.rb-tag-balance { background: var(--balance); }
+
+.rb-receipt-divider {
+  border-top: 1px solid var(--line);
+  margin: 8px 0;
+}
+
+.rb-receipt-total {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.rb-receipt-note {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.rb-receipt-note-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.rb-print-area {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .rb-root { flex-direction: column; }
+  .rb-sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--line); }
+  .rb-main { padding: 20px; }
+  .rb-cycle-top { grid-template-columns: 1fr; }
+  .rb-header { flex-direction: column; gap: 12px; }
+  .rb-header-right { align-items: flex-start; }
+}
+`;
+
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<RentalBilling />);
+</script>
+</body>
+</html>
