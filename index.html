@@ -70,6 +70,7 @@ function makeRow(renter) {
   return {
     rent: lastBill ? String(lastBill.rent) : "",
     devices: lastBill ? String(lastBill.devices) : "",
+    occupants: lastBill && lastBill.occupants != null ? String(lastBill.occupants) : "1",
     previousBalance: String(renter.outstandingBalance || 0),
     notes: "",
     included: true,
@@ -241,7 +242,16 @@ function RentalBilling() {
   const submeterBillAmount = submeterKwhUsed * rate;
 
   const includedRenters = renterList.filter((r) => (rows[r.id] || makeRow(r)).included);
-  const perRenterElectric = includedRenters.length > 0 ? submeterBillAmount / includedRenters.length : 0;
+  const totalOccupants = includedRenters.reduce((sum, r) => {
+    const row = rows[r.id] || makeRow(r);
+    return sum + (parseFloat(row.occupants) || 0);
+  }, 0);
+
+  function electricShareFor(renterId) {
+    const row = rows[renterId] || makeRow(data.renters[renterId]);
+    const occupantsNum = parseFloat(row.occupants) || 0;
+    return totalOccupants > 0 ? submeterBillAmount * (occupantsNum / totalOccupants) : 0;
+  }
 
   function generateCycleBills() {
     setCycleError("");
@@ -255,6 +265,8 @@ function RentalBilling() {
       const row = rows[r.id];
       const rentNum = parseFloat(row.rent);
       if (row.rent === "" || isNaN(rentNum)) return setCycleError(`Enter rent for ${r.name}.`);
+      const occupantsNum = parseFloat(row.occupants);
+      if (row.occupants === "" || isNaN(occupantsNum) || occupantsNum <= 0) return setCycleError(`Enter how many people live under ${r.name}'s account.`);
     }
 
     setData((prev) => {
@@ -262,10 +274,12 @@ function RentalBilling() {
       includedRenters.forEach((r) => {
         const row = rows[r.id];
         const rentNum = parseFloat(row.rent) || 0;
+        const occupantsNum = parseFloat(row.occupants) || 0;
         const devicesNum = parseFloat(row.devices) || 0;
         const prevBalanceNum = parseFloat(row.previousBalance) || 0;
+        const electricShare = electricShareFor(r.id);
         const internetCost = devicesNum * internetRateNum;
-        const total = rentNum + perRenterElectric + internetCost + prevBalanceNum;
+        const total = rentNum + electricShare + internetCost + prevBalanceNum;
 
         const bill = {
           id: uid(),
@@ -278,8 +292,9 @@ function RentalBilling() {
           submeterCurrent: submeterCurrentNum,
           submeterKwhUsed,
           submeterBillAmount,
-          sharedAmongCount: includedRenters.length,
-          electricCost: perRenterElectric,
+          occupants: occupantsNum,
+          totalOccupants,
+          electricCost: electricShare,
           devices: devicesNum,
           internetRatePerDevice: internetRateNum,
           internetCost,
@@ -313,11 +328,13 @@ function RentalBilling() {
         const row = prev[r.id];
         const rentNum = parseFloat(row.rent) || 0;
         const devicesNum = parseFloat(row.devices) || 0;
+        const electricShare = electricShareFor(r.id);
         const internetCost = devicesNum * internetRateNum;
-        const total = rentNum + perRenterElectric + internetCost + (parseFloat(row.previousBalance) || 0);
+        const total = rentNum + electricShare + internetCost + (parseFloat(row.previousBalance) || 0);
         next[r.id] = {
           rent: row.rent,
           devices: row.devices,
+          occupants: row.occupants,
           previousBalance: String(total),
           notes: "",
           included: true,
@@ -368,7 +385,7 @@ function RentalBilling() {
       <tr>
         <td>
           Electric
-          <div class="sub">Submeter ${b.submeterPrevious} to ${b.submeterCurrent} = ${b.submeterKwhUsed} kWh at ${fmt(b.kwhRate)}/kWh = ${fmt(b.submeterBillAmount)}, split ${b.sharedAmongCount} ways</div>
+          <div class="sub">Submeter ${b.submeterPrevious} to ${b.submeterCurrent} = ${b.submeterKwhUsed} kWh at ${fmt(b.kwhRate)}/kWh = ${fmt(b.submeterBillAmount)} total, ${b.occupants} of ${b.totalOccupants} occupants</div>
         </td>
         <td>${fmt(b.electricCost)}</td>
       </tr>
@@ -379,20 +396,20 @@ function RentalBilling() {
         </td>
         <td>${fmt(b.internetCost)}</td>
       </tr>
-      ${b.previousBalance > 0 ? '<tr><td>Previous balance</td><td>' + fmt(b.previousBalance) + '</td></tr>' : ""}
+      ${b.previousBalance > 0 ? `<tr><td>Previous balance</td><td>${fmt(b.previousBalance)}</td></tr>` : ""}
       <tr class="total-row">
         <td>Total due</td>
         <td>${fmt(b.total)}</td>
       </tr>
     </tbody>
   </table>
-  ${b.notes ? '<div class="notes"><div class="notes-label">Note</div><div>' + b.notes + '</div></div>' : ""}
+  ${b.notes ? `<div class="notes"><div class="notes-label">Note</div><div>${b.notes}</div></div>` : ""}
   <script>
     window.onload = function () {
       window.focus();
       window.print();
     };
-  <\/script>
+  </script>
 </body>
 </html>`;
 
@@ -491,11 +508,11 @@ function RentalBilling() {
           <div className="rb-computed">
             <div className="rb-computed-row"><span>Rate per kWh</span><span className="rb-mono">{fmt(rate)}</span></div>
             <div className="rb-computed-row"><span>Submeter kWh used</span><span className="rb-mono">{submeterKwhUsed}</span></div>
-            <div className="rb-computed-row"><span>Submeter bill amount</span><span className="rb-mono">{fmt(submeterBillAmount)}</span></div>
             <div className="rb-computed-row rb-total-row">
-              <span>Electric share per renter ({includedRenters.length} included)</span>
-              <span className="rb-mono">{fmt(perRenterElectric)}</span>
+              <span>Submeter bill amount</span>
+              <span className="rb-mono">{fmt(submeterBillAmount)}</span>
             </div>
+            <div className="rb-computed-row"><span>Total occupants this cycle</span><span className="rb-mono">{totalOccupants}</span></div>
           </div>
 
           {renterList.length === 0 ? (
@@ -508,6 +525,8 @@ function RentalBilling() {
                     <th>Include</th>
                     <th>Renter</th>
                     <th>Rent</th>
+                    <th>Occupants</th>
+                    <th>Electric share</th>
                     <th>Devices</th>
                     <th>Previous balance</th>
                     <th>Notes</th>
@@ -516,6 +535,7 @@ function RentalBilling() {
                 <tbody>
                   {renterList.map((r) => {
                     const row = rows[r.id] || makeRow(r);
+                    const liveShare = row.included ? submeterBillAmount * ((parseFloat(row.occupants) || 0) / (totalOccupants || 1)) : 0;
                     return (
                       <tr key={r.id} className={row.included ? "" : "rb-row-excluded"}>
                         <td>
@@ -526,6 +546,11 @@ function RentalBilling() {
                           <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="0.00"
                             value={row.rent} onChange={(e) => updateRow(r.id, "rent", e.target.value)} />
                         </td>
+                        <td>
+                          <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="1"
+                            value={row.occupants} onChange={(e) => updateRow(r.id, "occupants", e.target.value)} />
+                        </td>
+                        <td className="rb-mono rb-cell-readonly">{row.included ? fmt(liveShare) : "-"}</td>
                         <td>
                           <input className="rb-input rb-input-cell" inputMode="decimal" placeholder="0"
                             value={row.devices} onChange={(e) => updateRow(r.id, "devices", e.target.value)} />
@@ -619,7 +644,7 @@ function RentalBilling() {
                   </div>
                   <div className="rb-receipt-sub">
                     Submeter {b.submeterPrevious} to {b.submeterCurrent} = {b.submeterKwhUsed} kWh at {fmt(b.kwhRate)}/kWh
-                    = {fmt(b.submeterBillAmount)}, split {b.sharedAmongCount} ways
+                    = {fmt(b.submeterBillAmount)} total, {b.occupants} of {b.totalOccupants} occupants
                   </div>
                   <div className="rb-receipt-line">
                     <span className="rb-tag rb-tag-internet">Internet</span>
